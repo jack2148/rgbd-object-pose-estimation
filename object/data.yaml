@@ -1,0 +1,10 @@
+path: /home/chan/rgbd_camera/object
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 3
+names:
+  0: cylinder
+  1: hole
+  2: cross

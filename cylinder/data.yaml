@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['cylinder']
+
+roboflow:
+  workspace: s-workspace-6maoo
+  project: cylinder-8ngni
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/s-workspace-6maoo/cylinder-8ngni/dataset/1

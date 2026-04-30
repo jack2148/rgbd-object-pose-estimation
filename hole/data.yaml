@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['square']
+
+roboflow:
+  workspace: s-workspace-6maoo
+  project: hole-d7iz8
+  version: 1
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/s-workspace-6maoo/hole-d7iz8/dataset/1
