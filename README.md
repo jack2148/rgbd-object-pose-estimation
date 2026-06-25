@@ -1,189 +1,389 @@
-# RGB-D Object Pose Estimation
+# RGB-D Object Pose Estimation with FoundationPose 6D
 
-[KR] Intel RealSense D455와 YOLOv8 인스턴스 세그멘테이션을 활용한 실시간 3D 물체 자세 추정 시스템입니다. 산업용 부품 3종(실린더, 홀, 크로스)을 실시간으로 검출하고 각 물체의 **3D 좌표(X, Y, Z)**와 **방향각**을 출력합니다.
+Intel RealSense D455와 YOLOv8 인스턴스 세그멘테이션으로 산업용 부품 3종(`cross`, `cylinder`, `hole`)을 검출하고, RGB-D + CAD mesh + mask를 FoundationPose에 입력해 카메라 좌표계 기준 **6D pose(position + orientation)**를 추정하는 프로젝트입니다.
 
-[EN] A real-time 3D object pose estimation system using Intel RealSense D455 and YOLOv8 instance segmentation. Detects three industrial parts (cylinder, hole, cross) and outputs their **3D coordinates (X, Y, Z)** and **orientation angle** in real time.
-
----
-
-## 주요 기능
-
-- YOLOv8n-seg 기반 인스턴스 세그멘테이션 (mAP50 평균 0.929)
-- RGB-D 정합(`rs.align`)을 통한 픽셀 단위 깊이 매핑
-- 마스크 중심점 역투영으로 카메라 좌표계 3D 위치 추정
-- 마스크 중앙값 깊이 샘플링으로 노이즈 강건성 확보
-- minAreaRect 기반 방향각 추정
-- 3종 데이터셋 병합 및 클래스 ID 자동 리매핑
-- ROS2 Humble 연동 — JSON 포맷 `/object_poses` 토픽 발행 (10 Hz)
+기존 `detect_3d_pose.py`는 빠른 2.5D baseline입니다. 새로 추가된 `foundation_pose_node.py`는 FoundationPose를 사용해 CAD 정합 기반 6D pose를 ROS2 토픽으로 발행합니다.
 
 ---
 
-## 시스템 구조
+## Highlights
 
-### 하드웨어
+- **YOLOv8n-seg instance segmentation**: 평균 Mask mAP50 **0.9290**
+- **RealSense D455 RGB-D alignment**: `rs.align`으로 color/depth 픽셀 정합
+- **2.5D baseline**: mask 중심점 + depth median + `minAreaRect` 방향각
+- **FoundationPose 6D extension**: CAD mesh + RGB-D + instance mask 기반 4x4 pose matrix 추정
+- **ROS2 output**: JSON `/object_poses`, `geometry_msgs/PoseStamped` `/object_pose_stamped`
+- **Fail-soft design**: FoundationPose 실패 시 depth PCA fallback으로 디버깅용 pose 유지
 
-Intel RealSense D455, NVIDIA GeForce RTX 4060 Laptop
+---
 
-### 소프트웨어
+## System Overview
 
-Python 3.10, YOLOv8n-seg (Ultralytics), pyrealsense2, OpenCV, ROS2 Humble (선택)
+### Hardware
 
-### 데이터 흐름
+| Item | Spec |
+|------|------|
+| RGB-D Camera | Intel RealSense D455 |
+| GPU | NVIDIA GeForce RTX 4060 Laptop |
+| Target Objects | cylinder, hole, cross |
 
+### Software
+
+| Layer | Stack |
+|------|-------|
+| OS | Ubuntu 22.04 |
+| Language | Python 3.10 |
+| Detection | YOLOv8n-seg, Ultralytics |
+| 6D Pose | FoundationPose, CAD mesh, RGB-D |
+| Camera | Intel RealSense SDK / `pyrealsense2` |
+| Middleware | ROS2 Humble |
+| Visualization | OpenCV |
+
+---
+
+## Pipeline
+
+```text
+RealSense D455
+  -> aligned RGB-D frame
+  -> YOLOv8 instance segmentation
+  -> binary object mask
+  -> nearest valid target selection
+  -> FoundationPose register/track with CAD mesh
+  -> 4x4 pose matrix in camera_color_optical_frame
+  -> JSON + PoseStamped publish
 ```
-데이터 수집            라벨링           학습               추론
-data_collector.py  →  Roboflow  →  train_yolo.py  →  detect_3d_pose.py
-RealSense D455        polygon seg    YOLOv8n-seg       3D position + angle
+
+### 2.5D Baseline (`detect_3d_pose.py`)
+
+```text
+YOLO mask -> mask centroid -> median depth -> camera back-projection
+          -> minAreaRect orientation angle
 ```
 
-### 3D 자세 추정 파이프라인 (detect_3d_pose.py)
-
-1. RGB-D 프레임 정합 (`rs.align`) — 컬러-깊이 픽셀 1:1 대응
-2. YOLOv8-seg 추론 — 인스턴스 마스크 획득
-3. 마스크 중심점 `(cx, cy)` 계산
-4. 마스크 영역 깊이 중앙값 샘플링 → `depth_m`
-5. 카메라 내부 파라미터로 역투영 → `(X, Y, Z)` [m]
-6. 마스크 윤곽에 `minAreaRect` 피팅 → `angle` [deg]
-
-```
+```text
 X = (cx - ppx) * depth_m / fx
 Y = (cy - ppy) * depth_m / fy
 Z = depth_m
 ```
 
+This baseline is lightweight and useful for object picking experiments, but orientation is estimated from a 2D mask angle. It does not perform CAD-to-image 6D alignment.
+
+### FoundationPose 6D (`foundation_pose_node.py`)
+
+```text
+YOLO mask + RGB + depth + camera K + CAD mesh
+  -> FoundationPose.register() on first observation
+  -> FoundationPose.track_one() on subsequent frames
+  -> translation [m] + quaternion [x,y,z,w] + 4x4 pose matrix
+```
+
+The node publishes the nearest valid target only. This matches a practical bin-picking flow where the robot first handles the closest reachable part.
+
 ---
 
-## 학습 결과
+## When Does Real 6D Pose Come Out?
 
-mAP50이 20 에폭 내에 0.93 이상으로 수렴하고 100 에폭까지 Train/Val Loss가 함께 감소 — 과적합 없음.
+`foundation_pose_node.py` publishes a message every frame when a valid target pose exists. The JSON field `is_cad_aligned_6d` tells whether the output is true FoundationPose 6D or a fallback estimate.
 
-Cylinder와 Cross는 형상이 뚜렷해 mAP50 0.95 이상을 달성했습니다. Hole은 카메라 각도에 따라 형상이 원형에서 타원형으로 변해 상대적으로 낮지만, Precision은 0.946으로 오탐은 적습니다.
+| Condition | Output | `pose_source` | `is_cad_aligned_6d` |
+|-----------|--------|---------------|---------------------|
+| YOLO mask detected, valid depth exists, CAD mesh exists, FoundationPose imports, CUDA/nvdiffrast works, register/track succeeds | CAD-aligned 6D pose | `foundationpose` | `true` |
+| FoundationPose is missing or fails, but mask depth has enough points | approximate centroid + PCA orientation | `depth_pca_fallback` | `false` |
+| No mask, no valid depth, or too few depth points | no target pose | `none` or `target: null` | `false` |
 
-| Class    | mAP50 (Box) | mAP50 (Mask) | Precision | Recall |
-|----------|:-----------:|:------------:|:---------:|:------:|
-| cylinder |   0.9950    |    0.9950    |   0.9839  | 1.0000 |
-| hole     |   0.8473    |    0.8394    |   0.9458  | 0.8571 |
-| cross    |   0.9527    |    0.9527    |   0.9062  | 0.9666 |
-| **mean** | **0.9317**  |  **0.9290**  | **0.9453**|**0.9412**|
+The fallback is intentionally kept for debugging and system continuity. For robot grasping, use outputs where:
 
-**Validation predictions**
+```json
+"is_cad_aligned_6d": true
+```
+
+---
+
+## ROS2 Output
+
+### Topics
+
+| Topic | Type | Description |
+|-------|------|-------------|
+| `/object_poses` | `std_msgs/String` | JSON payload with class, confidence, pose source, position, quaternion, pose matrix |
+| `/object_pose_stamped` | `geometry_msgs/PoseStamped` | PoseStamped for the selected target |
+
+### JSON Example
+
+```json
+{
+  "target": {
+    "class": "cylinder",
+    "confidence": 0.921,
+    "pose_source": "foundationpose",
+    "is_cad_aligned_6d": true,
+    "frame_id": "camera_color_optical_frame",
+    "position": {
+      "x": 0.0312,
+      "y": -0.0124,
+      "z": 0.4231
+    },
+    "orientation": {
+      "x": 0.012341,
+      "y": -0.004221,
+      "z": 0.701884,
+      "w": 0.712171
+    },
+    "pose_matrix": [[...], [...], [...], [...]],
+    "priority": {
+      "selected": true,
+      "reason": "nearest_valid_mask_depth",
+      "depth_median_m": 0.423,
+      "detected_count": 2
+    }
+  },
+  "detected_count": 2
+}
+```
+
+---
+
+## Performance
+
+The repo contains measured YOLO segmentation performance and training curves. 6D pose accuracy is not reported as a numeric ADD/ADD-S score here because the dataset does not include motion-capture or robot-calibrated 6D ground truth. The FoundationPose path is implemented and observable through `pose_source=foundationpose`; quantitative 6D pose benchmarking should be added with calibrated GT poses.
+
+### Segmentation Metrics
+
+| Class | mAP50 Box | mAP50 Mask | Precision | Recall |
+|-------|:---------:|:----------:|:---------:|:------:|
+| cylinder | 0.9950 | 0.9950 | 0.9839 | 1.0000 |
+| hole | 0.8473 | 0.8394 | 0.9458 | 0.8571 |
+| cross | 0.9527 | 0.9527 | 0.9062 | 0.9666 |
+| **mean** | **0.9317** | **0.9290** | **0.9453** | **0.9412** |
+
+### Training Summary
+
+![Training summary table](training_summary_table.png)
+
+### Best Metrics
+
+![Best training metrics](training_best_metrics.png)
+
+### Training Curves
+
+![Training curves](training_curves.png)
+
+### Validation Samples
 
 | Labels | Predictions |
 |--------|-------------|
-| ![val labels](runs/segment/train/val_batch0_labels.jpg) | ![val preds](runs/segment/train/val_batch0_pred.jpg) |
+| ![Validation labels](runs/segment/train/val_batch0_labels.jpg) | ![Validation predictions](runs/segment/train/val_batch0_pred.jpg) |
 
-**Training curves**
+### Notes on Runtime
 
-![Training Curves](training_curves.png)
-
----
-
-## 데이터셋
-
-| Class    | Train | Valid |
-|----------|------:|------:|
-| cylinder |   112 |    21 |
-| hole     |   137 |    25 |
-| cross    |   141 |    26 |
-
-RealSense D455로 직접 수집. 자동 화이트밸런스 비활성화로 색상 일관성 유지. Roboflow에서 폴리곤 세그멘테이션 라벨링 후 3개 데이터셋을 병합해 학습.
+- `detect_3d_pose.py` is the fastest path and is suitable for quick RGB-D validation.
+- `foundation_pose_node.py` is heavier because FoundationPose performs neural scoring/refinement and CUDA rasterization.
+- First observation of a class uses `register()` and is slower; subsequent frames use `track_one()`.
+- Runtime depends on GPU, CUDA/PyTorch/nvdiffrast versions, mesh size, `FP_REGISTER_ITER`, and `FP_TRACK_ITER`.
 
 ---
 
-## 실행 방법
+## Dataset
 
-### 1. 의존성 설치
+RGB images were collected with RealSense D455 and labeled as polygon segmentation masks in Roboflow. The three class-specific datasets were merged and class IDs were remapped for YOLOv8-seg training.
 
-```bash
-pip install -r requirements.txt
-```
+| Class | Train | Valid |
+|-------|------:|------:|
+| cylinder | 112 | 21 |
+| hole | 137 | 25 |
+| cross | 141 | 26 |
 
-> `pyrealsense2`는 [Intel RealSense SDK 2.0](https://github.com/IntelRealSense/librealsense) 설치가 필요합니다.
-> `pose_publisher.py`는 ROS2 Humble 이상이 추가로 필요합니다.
+---
 
-### 2. 실시간 검출 (RealSense D455 필요)
+## Installation
 
-```bash
-python detect_3d_pose.py
-```
-
-`ESC`로 종료. 터미널 출력 예시:
-
-```
-[cylinder] conf=0.92 | 3D=(+0.031, -0.012, 0.423) m | angle=87.3°
-[cross   ] conf=0.88 | 3D=(-0.104, +0.021, 0.381) m | angle=12.1°
-```
-
-### 3. 데이터 수집
+### 1. Base Python Dependencies
 
 ```bash
-python data_collector.py
-# r: 자동 캡처 토글 (0.5초 간격)
-# s: 수동 단일 촬영
-# q: 종료
+python3 -m pip install -r requirements.txt
 ```
 
-### 4. 학습
+`pyrealsense2` requires Intel RealSense SDK 2.0 / librealsense on the host.
 
-`cross/`, `cylinder/`, `hole/` 폴더에 Roboflow export를 배치한 뒤 (각 폴더 내 `train/`, `valid/`, `test/` 구조):
+### 2. ROS2 Humble
+
+`foundation_pose_node.py` publishes ROS2 topics, so ROS2 Humble or newer should be sourced before running:
 
 ```bash
-python -c "from ultralytics import YOLO; YOLO('yolov8n-seg.pt')"
-python train_yolo.py
+source /opt/ros/humble/setup.bash
 ```
 
-학습 결과 → `runs/segment/objects_seg/weights/best.pt`
+### 3. FoundationPose Dependencies
 
-### 5. 결과 시각화
+FoundationPose requires CUDA, PyTorch with matching CUDA, nvdiffrast, PyTorch3D, and pretrained FoundationPose weights.
 
 ```bash
-python analyze_results.py   # runs/segment/train/results.csv 필요
-python eval_plot.py         # 상세 요약 테이블
+bash setup_foundationpose.sh
 ```
 
-### 6. ROS2 자세 발행 (선택)
+If your environment uses a specific virtualenv Python, pass it explicitly:
 
 ```bash
-# /object_poses 토픽으로 JSON 발행 (std_msgs/String)
-python pose_publisher.py
+PYTHON_BIN=/path/to/venv/bin/python bash setup_foundationpose.sh
+```
+
+The script clones FoundationPose into:
+
+```text
+~/FoundationPose
+```
+
+If the Google Drive weight download fails, download the official FoundationPose weights manually from the NVlabs FoundationPose repository and place them under:
+
+```text
+~/FoundationPose/weights/
+```
+
+### 4. CAD Meshes
+
+The 6D node expects one mesh per class:
+
+```text
+CAD/
+├── cross.stl
+├── cylinder.stl
+└── hole.stl
+```
+
+Default mesh scale is `0.001`, assuming STL files are in millimeters. If your CAD files are already in meters:
+
+```bash
+export CAD_MESH_SCALE=1.0
 ```
 
 ---
 
-## 프로젝트 구조
+## Run
 
+### 1. 2.5D Baseline
+
+```bash
+python3 detect_3d_pose.py
 ```
+
+Output example:
+
+```text
+[cylinder] conf=0.92 | 3D=(+0.031, -0.012, 0.423) m | angle=87.3 deg
+[cross   ] conf=0.88 | 3D=(-0.104, +0.021, 0.381) m | angle=12.1 deg
+```
+
+### 2. FoundationPose 6D Node
+
+```bash
+source /opt/ros/humble/setup.bash
+python3 foundation_pose_node.py
+```
+
+Check output:
+
+```bash
+ros2 topic echo /object_poses
+ros2 topic echo /object_pose_stamped
+```
+
+### Useful Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `YOLO_MODEL_PATH` | `best.pt` | YOLOv8 segmentation model path |
+| `FOUNDATIONPOSE_DIR` | `~/FoundationPose` | FoundationPose source directory |
+| `CAD_MESH_SCALE` | `0.001` | Mesh unit scale before pose estimation |
+| `CONF_THRESH` | `0.4` | YOLO confidence threshold |
+| `FP_REGISTER_ITER` | `5` | FoundationPose initial registration iterations |
+| `FP_TRACK_ITER` | `2` | FoundationPose tracking iterations |
+| `FP_ALWAYS_REGISTER` | `0` | Set to `1` to run register every frame |
+| `POSE_FRAME_ID` | `camera_color_optical_frame` | ROS pose frame ID |
+
+---
+
+## Training
+
+Place Roboflow exports under `cross/`, `cylinder/`, and `hole/`, each with `train/`, `valid/`, and `test/` folders.
+
+```bash
+python3 -c "from ultralytics import YOLO; YOLO('yolov8n-seg.pt')"
+python3 train_yolo.py
+```
+
+Training output:
+
+```text
+runs/segment/objects_seg/weights/best.pt
+```
+
+The realtime scripts load the root-level `best.pt` by default. After retraining, copy the new checkpoint:
+
+```bash
+cp runs/segment/objects_seg/weights/best.pt best.pt
+```
+
+---
+
+## Result Visualization
+
+```bash
+python3 analyze_results.py
+python3 eval_plot.py
+```
+
+These scripts consume `runs/segment/train/results.csv` and generate summary plots/tables.
+
+---
+
+## Project Structure
+
+```text
 rgbd-object-pose-estimation/
-├── detect_3d_pose.py      # 메인 — 실시간 마스크 + 3D 자세 출력
-├── train_yolo.py          # 데이터셋 병합 + YOLOv8 학습
-├── data_collector.py      # RealSense 이미지 수집 도구
-├── analyze_results.py     # 학습 결과 시각화
-├── eval_plot.py           # 평가 요약 테이블
-├── pose_publisher.py      # ROS2 노드 — JSON 토픽 발행
-├── test_3d_pose.py        # 클릭으로 픽셀 3D 좌표 확인 유틸
-├── test_d455.py           # RealSense 기본 스트림 테스트
-├── object_cropper.py      # 색상+깊이 임계값 기반 크롭 도구
-└── best.pt                # 학습된 YOLOv8n-seg 모델
+├── foundation_pose_node.py        # FoundationPose CAD-aligned 6D pose ROS2 node
+├── setup_foundationpose.sh        # FoundationPose/CUDA dependency setup helper
+├── requirements-foundationpose.txt
+├── CAD/
+│   ├── cross.stl
+│   ├── cylinder.stl
+│   └── hole.stl
+├── detect_3d_pose.py              # 2.5D baseline: mask + depth + 2D angle
+├── pose_publisher.py              # ROS2 JSON publisher for baseline pose
+├── train_yolo.py                  # YOLOv8-seg training
+├── data_collector.py              # RealSense image capture
+├── analyze_results.py             # Training result analysis
+├── eval_plot.py                   # Metric table/plot generation
+├── test_3d_pose.py                # Pixel-to-3D test utility
+├── test_d455.py                   # RealSense stream test
+├── object_cropper.py              # Color/depth crop helper
+├── best.pt                        # Trained YOLOv8n-seg model
+├── training_curves.png
+├── training_best_metrics.png
+└── training_summary_table.png
 ```
 
 ---
 
-## 기술 스택
+## Portfolio Takeaways
 
-| 분류 | 내용 |
-|------|------|
-| OS | Ubuntu 22.04 |
-| Language | Python 3.10 |
-| Model | YOLOv8n-seg (Ultralytics) |
-| Camera | Intel RealSense D455 |
-| GPU | NVIDIA GeForce RTX 4060 Laptop |
-| Libraries | pyrealsense2, OpenCV, NumPy, Matplotlib |
-| ROS2 | Humble (pose_publisher.py only) |
+- Built an end-to-end RGB-D perception pipeline from data collection to deployment.
+- Trained a custom YOLOv8 instance segmentation model for small industrial parts.
+- Extended a 2.5D depth baseline into CAD-based 6D pose estimation with FoundationPose.
+- Designed ROS2 outputs that are directly usable by a robot manipulation stack.
+- Preserved fallback behavior and explicit pose provenance for safer debugging.
+
+---
+
+## Limitations and Next Steps
+
+- Add calibrated 6D ground-truth evaluation with ADD/ADD-S, translation error, and rotation error.
+- Add robot hand-eye calibration and transform publication from camera frame to robot base frame.
+- Benchmark FPS for `register()` and `track_one()` separately on RTX 4060 Laptop.
+- Improve multi-instance tracking if several objects of the same class are visible at once.
 
 ---
 
 ## English Summary
 
-Real-time 3D object pose estimation using Intel RealSense D455 and YOLOv8 instance segmentation. Detects three industrial parts (cylinder, hole, cross) and outputs 3D position and orientation angle per object.
-
-Cylinder and cross achieve mAP50 above 0.95 due to their distinctive geometry. Hole scores lower (0.847) as its shape varies with camera angle, but Precision stays at 0.946 — few false positives. mAP50 converges above 0.93 within 20 epochs with no overfitting across 100 epochs.
+This project estimates object pose from an Intel RealSense D455 RGB-D camera. A YOLOv8 segmentation model detects `cross`, `cylinder`, and `hole` objects. The baseline estimates 3D position and a 2D mask orientation from depth. The FoundationPose extension uses RGB-D, object masks, camera intrinsics, and CAD meshes to publish CAD-aligned 6D pose as ROS2 JSON and PoseStamped messages.
