@@ -1,19 +1,19 @@
 # RGB-D Object Pose Estimation with FoundationPose 6D
 
-Intel RealSense D455와 YOLOv8 인스턴스 세그멘테이션으로 산업용 부품 3종(`cross`, `cylinder`, `hole`)을 검출하고, RGB-D + CAD mesh + mask를 FoundationPose에 입력해 카메라 좌표계 기준 **6D pose(position + orientation)**를 추정하는 프로젝트입니다.
+This project detects three industrial parts (`cross`, `cylinder`, and `hole`) using an Intel RealSense D455 and YOLOv8 instance segmentation, then supplies RGB-D data, a CAD mesh, and the object mask to FoundationPose to estimate the **6D pose (position + orientation)** in the camera frame.
 
-기존 `detect_3d_pose.py`는 빠른 2.5D baseline입니다. 새로 추가된 `foundation_pose_node.py`는 FoundationPose를 사용해 CAD 정합 기반 6D pose를 ROS2 토픽으로 발행합니다.
+The existing `detect_3d_pose.py` provides a fast 2.5D baseline. The `foundation_pose_node.py` extension uses FoundationPose to publish CAD-aligned 6D poses as ROS2 topics.
 
 ---
 
 ## Highlights
 
-- **YOLOv8n-seg instance segmentation**: 평균 Mask mAP50 **0.9290**
-- **RealSense D455 RGB-D alignment**: `rs.align`으로 color/depth 픽셀 정합
-- **2.5D baseline**: mask 중심점 + depth median + `minAreaRect` 방향각
-- **FoundationPose 6D extension**: CAD mesh + RGB-D + instance mask 기반 4x4 pose matrix 추정
-- **ROS2 output**: JSON `/object_poses`, `geometry_msgs/PoseStamped` `/object_pose_stamped`
-- **Fail-soft design**: FoundationPose 실패 시 depth PCA fallback으로 디버깅용 pose 유지
+- **YOLOv8n-seg instance segmentation**: validation mean mask mAP50 **0.9290**
+- **RealSense D455 RGB-D alignment**: color and depth pixels aligned with `rs.align`
+- **2.5D baseline**: mask centroid + median depth + `minAreaRect` orientation
+- **FoundationPose 6D extension**: 4x4 pose estimation from a CAD mesh, RGB-D, and an instance mask
+- **ROS2 output**: JSON on `/object_poses` and `geometry_msgs/PoseStamped` on `/object_pose_stamped`
+- **Fail-soft design**: depth-PCA fallback preserves a diagnostic pose if FoundationPose fails
 
 ---
 
@@ -149,6 +149,8 @@ The fallback is intentionally kept for debugging and system continuity. For robo
 The repo contains measured YOLO segmentation performance and training curves. 6D pose accuracy is not reported as a numeric ADD/ADD-S score here because the dataset does not include motion-capture or robot-calibrated 6D ground truth. The FoundationPose path is implemented and observable through `pose_source=foundationpose`; quantitative 6D pose benchmarking should be added with calibrated GT poses.
 
 ### Segmentation Metrics
+
+Validation mean mask mAP50 = **0.9290**. These are segmentation metrics, not quantitative 6D-pose accuracy measurements.
 
 | Class | mAP50 Box | mAP50 Mask | Precision | Recall |
 |-------|:---------:|:----------:|:---------:|:------:|
@@ -312,7 +314,7 @@ python3 -c "from ultralytics import YOLO; YOLO('yolov8n-seg.pt')"
 python3 train_yolo.py
 ```
 
-Training output:
+With the current `train_yolo.py` configuration, new training output is written to:
 
 ```text
 runs/segment/objects_seg/weights/best.pt
@@ -334,6 +336,8 @@ python3 eval_plot.py
 ```
 
 These scripts consume `runs/segment/train/results.csv` and generate summary plots/tables.
+
+The checked-in historical checkpoint, CSV, and validation visualizations are under `runs/segment/train/`; the current training script uses `runs/segment/objects_seg/` for newly generated runs.
 
 ---
 
