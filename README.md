@@ -78,7 +78,7 @@ YOLO mask + RGB + depth + camera K + CAD mesh
   -> translation [m] + quaternion [x,y,z,w] + 4x4 pose matrix
 ```
 
-The node publishes the nearest valid target only. This matches a practical bin-picking flow where the robot first handles the closest reachable part.
+The node publishes the nearest valid target only. This matches a simple bin-picking target-selection heuristic that selects the nearest valid detected part.
 
 ---
 
@@ -371,7 +371,7 @@ rgbd-object-pose-estimation/
 
 ## Portfolio Takeaways
 
-- Built an end-to-end RGB-D perception pipeline from data collection to deployment.
+- Built an end-to-end RGB-D perception pipeline from data collection to ROS 2 inference.
 - Trained a custom YOLOv8 instance segmentation model for small industrial parts.
 - Extended a 2.5D depth baseline into CAD-based 6D pose estimation with FoundationPose.
 - Designed ROS2 outputs that are directly usable by a robot manipulation stack.
